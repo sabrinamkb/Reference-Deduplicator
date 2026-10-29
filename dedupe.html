@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference deduplicator</title>
+<style>
+:root{--bg:#f2f4f6;--ink:#1b2430;--mute:#5d6b7a;--line:#d3dae1;--card:#fff;--acc:#0f6b73;--warn:#a4361f;--keep:#e3f3ee}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:28px 18px 80px}
+h1{font:600 26px/1.2 Georgia,serif;margin:0 0 4px}
+p.sub{color:var(--mute);margin:0 0 20px}
+#drop{border:2px dashed var(--acc);border-radius:10px;background:var(--card);padding:34px 18px;text-align:center;cursor:pointer}
+#drop.over{background:var(--keep)}
+#drop b{display:block;font-size:17px}
+#drop span{color:var(--mute);font-size:13px}
+.opts{display:flex;flex-wrap:wrap;gap:18px;align-items:center;margin:16px 0;padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:8px}
+.opts label{display:flex;gap:8px;align-items:center;font-size:14px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:16px 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 14px}
+.stat b{display:block;font-size:24px}
+.stat span{color:var(--mute);font-size:13px}
+.bar{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+button{font:inherit;border:1px solid var(--acc);background:var(--acc);color:#fff;border-radius:6px;padding:7px 14px;cursor:pointer}
+button.alt{background:#fff;color:var(--acc)}
+button:focus-visible,input:focus-visible{outline:3px solid #f0b429;outline-offset:2px}
+.grp{background:var(--card);border:1px solid var(--line);border-left:5px solid var(--warn);border-radius:8px;margin:12px 0;padding:10px 14px}
+.grp.off{border-left-color:var(--line);opacity:.6}
+.gh{display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:13px;color:var(--mute);margin-bottom:6px}
+.rec{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:8px;border-radius:6px}
+.rec.k{background:var(--keep)}
+.rec .t{font-weight:600}
+.rec .m{font-size:13px;color:var(--mute);word-break:break-word}
+.tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 6px;margin-left:6px}
+#msg{color:var(--warn);margin:10px 0}
+</style></head><body><main>
+<h1>Reference deduplicator</h1>
+<p class="sub">Drop your exported references (.ris, .bib, .csv). Everything runs in your browser; nothing is uploaded.</p>
+<div id="drop" tabindex="0" role="button"><b>Drop files here or click to choose</b><span>You can add several files at once (PubMed, Embase, Scopus, Web of Science, Rayyan exports…)</span>
+<input id="file" type="file" multiple accept=".ris,.txt,.bib,.csv,.tsv" hidden></div>
+<div id="msg" role="alert"></div>
+<div class="opts">
+<label>Title similarity <input id="th" type="range" min="70" max="100" value="90"> <b id="thv">90%</b></label>
+<label><input id="ry" type="checkbox" checked> Years must be within 1</label>
+<label><input id="ra" type="checkbox" checked> First authors must match</label>
+<button class="alt" id="clear">Clear all</button>
+</div>
+<div class="stats" id="stats"></div>
+<div class="bar" id="bar" hidden>
+<button id="e1">Download unique records (CSV)</button>
+<button id="e2" class="alt">Download unique records (RIS)</button>
+<button id="e3" class="alt">Download removed duplicates (CSV)</button>
+</div>
+<div id="groups"></div>
+</main>
+<script>
+let recs=[],groups=[];
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const norm=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/<[^>]*>/g,' ').replace(/[^a-z0-9]+/g,' ').trim();
+const normDoi=s=>{const m=/10\.\d{4,9}\/[^\s"<>]+/i.exec(s||'');return m?m[0].toLowerCase().replace(/[.,;]+$/,''):''};
+
+function parseRIS(t){const out=[];let c=null;
+ for(const ln of t.split(/\r?\n/)){const m=/^([A-Z][A-Z0-9])\s{1,2}-\s?(.*)$/.exec(ln);if(!m)continue;const [,k,v]=m;
+  if(k==='TY'){if(c)out.push(c);c={authors:[]};continue}
+  if(k==='ER'){if(c)out.push(c);c=null;continue}
+  if(!c)c={authors:[]};
+  if((k==='TI'||k==='T1')&&!c.title)c.title=v;
+  else if(k==='AU'||k==='A1')c.authors.push(v);
+  else if((k==='PY'||k==='Y1'||k==='DA')&&!c.year){const y=/\d{4}/.exec(v);if(y)c.year=y[0]}
+  else if(k==='DO')c.doi=v;
+  else if(['JO','JF','T2','JA'].includes(k)&&!c.journal)c.journal=v;
+  else if(k==='AB'||k==='N2')c.abstract=v;
+  else if((k==='UR'||k==='L1'||k==='N1')&&!c.doi){const d=normDoi(v);if(d)c.doi=d}}
+ if(c)out.push(c);return out}
+
+function parseBib(t){const out=[];let i=0;
+ while((i=t.indexOf('@',i))>=0){const m=/^@\w+\s*[{(]/.exec(t.slice(i,i+40));if(!m){i++;continue}
+  let j=i+m[0].length,d=1;while(j<t.length&&d>0){if(t[j]=='{')d++;else if(t[j]=='}')d--;j++}
+  const body=t.slice(i+m[0].length,j-1);i=j;const r={};let p=body.indexOf(',')+1;
+  while(p<body.length){const mm=/\s*(\w+)\s*=\s*/y;mm.lastIndex=p;const x=mm.exec(body);if(!x){p++;continue}
+   p=mm.lastIndex;let v,s;
+   if(body[p]=='{'){let dd=1;s=++p;while(p<body.length&&dd){if(body[p]=='{')dd++;else if(body[p]=='}')dd--;p++}v=body.slice(s,p-1)}
+   else if(body[p]=='"'){s=++p;while(p<body.length&&body[p]!='"')p++;v=body.slice(s,p);p++}
+   else{s=p;while(p<body.length&&body[p]!=',')p++;v=body.slice(s,p)}
+   r[x[1].toLowerCase()]=v.replace(/[{}]/g,'').replace(/\s+/g,' ').trim()}
+  out.push({title:r.title,authors:(r.author||'').split(/\s+and\s+/).filter(Boolean),year:(/\d{4}/.exec(r.year||r.date||'')||[])[0],doi:r.doi||r.url,journal:r.journal||r.booktitle,abstract:r.abstract})}
+ return out}
+
+function parseCSV(t){t=t.replace(/^\uFEFF/,'');const d=(t.split('\n')[0].match(/\t/g)||[]).length>(t.split('\n')[0].match(/,/g)||[]).length?'\t':',';
+ const rows=[];let r=[],f='',q=false;
+ for(let i=0;i<t.length;i++){const c=t[i];
+  if(q){if(c=='"'){if(t[i+1]=='"'){f+='"';i++}else q=false}else f+=c}
+  else if(c=='"')q=true;
+  else if(c==d){r.push(f);f=''}
+  else if(c=='\n'){r.push(f);rows.push(r);r=[];f=''}
+  else if(c!='\r')f+=c}
+ if(f||r.length){r.push(f);rows.push(r)}
+ const h=rows.shift().map(x=>x.trim().toLowerCase());
+ const col=(...n)=>h.findIndex(x=>n.some(k=>x===k||x.includes(k)));
+ const ci={t:col('title','article title'),a:col('authors','author'),y:col('year','publication year','date'),d:col('doi'),j:col('journal','source','publication title'),b:col('abstract')};
+ if(ci.t<0)throw new Error('No "title" column found in CSV');
+ const g=(r,i)=>i>=0?(r[i]||'').trim():'';
+ return rows.filter(r=>r.some(x=>x.trim())).map(r=>({title:g(r,ci.t),authors:g(r,ci.a).split(/;| and /).map(s=>s.trim()).filter(Boolean),year:(/\d{4}/.exec(g(r,ci.y))||[])[0],doi:g(r,ci.d),journal:g(r,ci.j),abstract:g(r,ci.b)}))}
+
+function mk(o,file){const title=(o.title||'').replace(/\s+/g,' ').trim();
+ const au=(o.authors||[]).map(a=>a.trim()).filter(Boolean);
+ const fa=new Set(norm(au[0]||'').split(' ').filter(w=>w.length>2));
+ const nt=norm(title),bg=new Set();for(let i=0;i<nt.length-1;i++)bg.add(nt.slice(i,i+2));
+ return{id:recs.length,file,title,authors:au,year:o.year||'',doi:normDoi(o.doi),journal:o.journal||'',abstract:o.abstract||'',nt,bg,fa}}
+
+function dice(a,b){if(!a.size||!b.size)return 0;let n=0;for(const x of a)if(b.has(x))n++;return 2*n/(a.size+b.size)}
+
+function detect(){
+ const th=$('th').value/100,ry=$('ry').checked,ra=$('ra').checked,n=recs.length,par=recs.map((_,i)=>i),why=new Map();
+ const find=x=>{while(par[x]!=x){par[x]=par[par[x]];x=par[x]}return x};
+ const link=(a,b,r)=>{const x=find(a),y=find(b);if(x!=y)par[y]=x;(why.get(a)||why.set(a,new Set()).get(a)).add(r);(why.get(b)||why.set(b,new Set()).get(b)).add(r)};
+ for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){const a=recs[i],b=recs[j];
+  if(a.doi&&a.doi===b.doi){link(i,j,'Same DOI');continue}
+  if(a.doi&&b.doi||a.nt.length<15||b.nt.length<15)continue;
+  const yOK=!ry||!a.year||!b.year||Math.abs(a.year-b.year)<=1;
+  const aOK=!ra||!a.fa.size||!b.fa.size||[...a.fa].some(w=>b.fa.has(w));
+  if(!yOK||!aOK)continue;
+  if(a.nt===b.nt){link(i,j,'Identical title');continue}
+  if(Math.min(a.nt.length,b.nt.length)/Math.max(a.nt.length,b.nt.length)<.7)continue;
+  if(dice(a.bg,b.bg)>=th)link(i,j,'Similar title')}
+ const m={};recs.forEach((r,i)=>(m[find(i)]=m[find(i)]||[]).push(i));
+ const score=r=>(r.doi?2:0)+(r.abstract?1+r.abstract.length/1e4:0)+(r.authors.length?.5:0)+(r.year?.2:0);
+ groups=Object.values(m).filter(g=>g.length>1).map(g=>({ids:g,keep:g.slice().sort((a,b)=>score(recs[b])-score(recs[a]))[0],off:false,why:[...new Set(g.flatMap(i=>[...(why.get(i)||[])]))].join(', ')}));
+ render()}
+
+const removed=()=>{const s=new Set();groups.filter(g=>!g.off).forEach(g=>g.ids.forEach(i=>i!=g.keep&&s.add(i)));return s};
+
+function render(){const rm=removed();
+ $('stats').innerHTML=recs.length?[[recs.length,'records imported'],[groups.filter(g=>!g.off).length,'duplicate groups'],[rm.size,'duplicates removed'],[recs.length-rm.size,'unique records left']].map(([a,b])=>`<div class="stat"><b>${a}</b><span>${b}</span></div>`).join(''):'';
+ $('bar').hidden=!recs.length;
+ $('groups').innerHTML=groups.map((g,gi)=>`<section class="grp ${g.off?'off':''}"><div class="gh"><span>Group ${gi+1}: ${esc(g.why)}</span><button class="alt" data-off="${gi}">${g.off?'Treat as duplicates':'Not duplicates'}</button></div>`+g.ids.map(i=>{const r=recs[i];return `<label class="rec ${i==g.keep&&!g.off?'k':''}"><input type="radio" name="g${gi}" data-keep="${gi}:${i}" ${i==g.keep?'checked':''}><div><div class="t">${esc(r.title||'(no title)')}${i==g.keep&&!g.off?'<span class="tag">kept</span>':''}</div><div class="m">${esc(r.authors.slice(0,3).join('; '))}${r.authors.length>3?' et al.':''} (${esc(r.year||'n.d.')}) ${esc(r.journal)}<br>${r.doi?'DOI '+esc(r.doi)+' · ':''}${esc(r.file)}${r.abstract?'':' · no abstract'}</div></div></label>`}).join('')+'</section>').join('')||(recs.length?'<p>No duplicates found at these settings.</p>':'')}
+
+$('groups').addEventListener('click',e=>{const o=e.target.dataset.off;if(o!==undefined){groups[o].off=!groups[o].off;render()}});
+$('groups').addEventListener('change',e=>{const k=e.target.dataset.keep;if(k){const [g,i]=k.split(':').map(Number);groups[g].keep=i;render()}});
+
+async function load(files){$('msg').textContent='';
+ for(const f of files){try{const t=await f.text(),x=f.name.toLowerCase();
+  const rows=x.endsWith('.bib')?parseBib(t):/\.(csv|tsv)$/.test(x)?parseCSV(t):parseRIS(t);
+  if(!rows.length)throw new Error('no records found');
+  rows.filter(r=>r.title).forEach(r=>recs.push(mk(r,f.name)))}
+  catch(err){$('msg').textContent+=`Could not read ${f.name}: ${err.message}. `}}
+ detect()}
+
+const drop=$('drop');
+drop.onclick=()=>$('file').click();
+drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')$('file').click()};
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');load([...e.dataTransfer.files])};
+$('file').onchange=e=>{load([...e.target.files]);e.target.value=''};
+$('th').oninput=()=>{$('thv').textContent=$('th').value+'%';if(recs.length)detect()};
+$('ry').onchange=$('ra').onchange=()=>recs.length&&detect();
+$('clear').onclick=()=>{recs=[];groups=[];$('msg').textContent='';render()};
+
+function save(name,text,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click()}
+const cq=s=>'"'+String(s??'').replace(/"/g,'""')+'"';
+const toCSV=l=>'\uFEFF'+['title,authors,year,journal,doi,abstract,source_file',...l.map(r=>[r.title,r.authors.join('; '),r.year,r.journal,r.doi,r.abstract,r.file].map(cq).join(','))].join('\r\n');
+const toRIS=l=>l.map(r=>['TY  - JOUR','TI  - '+r.title,...r.authors.map(a=>'AU  - '+a),r.year&&'PY  - '+r.year,r.journal&&'JO  - '+r.journal,r.doi&&'DO  - '+r.doi,r.abstract&&'AB  - '+r.abstract,'ER  - '].filter(Boolean).join('\r\n')).join('\r\n\r\n');
+$('e1').onclick=()=>{const rm=removed();save('unique_records.csv',toCSV(recs.filter((_,i)=>!rm.has(i))),'text/csv')};
+$('e2').onclick=()=>{const rm=removed();save('unique_records.ris',toRIS(recs.filter((_,i)=>!rm.has(i))),'text/plain')};
+$('e3').onclick=()=>{const rm=removed();save('removed_duplicates.csv',toCSV(recs.filter((_,i)=>rm.has(i))),'text/csv')};
+</script></body></html>
